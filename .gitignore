@@ -1,0 +1,8 @@
+*.swp
+obj/
+bin/
+a.out
+*.p.s
+*.l.s
+*.s
+*.rvm
