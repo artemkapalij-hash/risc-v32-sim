@@ -4,7 +4,13 @@ using System.Collections.Generic;
 using System.Collections.Frozen;
 
 namespace Riscv32Sim {
-
+    
+    /* This is used while generating bytecode. This is a representation
+     * of a single instruction as it is present in bytecode. Not 
+     * every field is used by a particular instruction, like
+     * add uses only rd, rs1, rs2 or ebreak has none at all.
+     * Unused fields must be assigned 0 to and be ignored by the runtime 
+     */
     readonly record struct Instruction {
 
         readonly int opcode;
@@ -343,15 +349,13 @@ namespace Riscv32Sim {
             lo = imm - (hi << 12);
         }
 
-        public void Assemble() {
+        /* Converts pseudo instructions into actual instructions
+         * not rd rs1 -> xori rd rs1 -1 (-1 = 0xFFFFFFFF) 
+         * mv  rd rs1 -> addi rd rs1 0
+         */
+        private void ExpandPseudoInstructions(List<string> instructions) {
 
-            string[] instructionsFile = File.ReadAllLines(_inFile);
-            List<string> instructions = new List<string>(instructionsFile);
-
-            // Converts pseudo instructions into actual instructions
-            // not rd rs1 -> xor  rd rs1 -1 (-1 = 0xFFFFFFFF) 
-            // mv  rd rs1 -> addi rd rs1 0
-            for (int i = 0; i < instructions.Count; i++) {
+             for (int i = 0; i < instructions.Count; i++) {
                 string[] tokens = instructions[i].Split([' ', '\t', ','], StringSplitOptions.RemoveEmptyEntries);
                 if (tokens.Length == 0) {
                     continue;
@@ -386,15 +390,18 @@ namespace Riscv32Sim {
                     instructions[i] = $"\tauipc\t{rd},%label_hi({label})\n\taddi\t{rd},{rd},%label_lo({label})";
                 }
             }
+           
+        }
+ 
+        /* Makes a dictionary of addresses to which all the labels in the 
+         * file go. Used in the label-to-jump substitution step 
+         */
+        private static void GetAddressesOfLabels(List<string> instructions, Dictionary<string, int> addressesOfLabels) {
 
-            instructions = instructions.SelectMany(line => line.Split('\n')).ToList();
-            File.WriteAllLines(_pseudoHandled, instructions);
-
-            Dictionary<string, int> addressesOfLabels = new();
             int count = 0;
             foreach (string instruction in instructions) {
                 if (instruction.Trim()[^1] == ':') {
-                    string label = instruction[..^1];
+                    string label = instruction.Trim()[..^1];
                     addressesOfLabels[label] = count;
                 }
                 else if (instruction.Trim()[0] == '.') {
@@ -405,11 +412,17 @@ namespace Riscv32Sim {
                 }
             }
 
-            instructions.RemoveAll(line => line.Trim().StartsWith('.') || line.Trim().EndsWith(':'));
+        }
 
-            count = 0;
+        /* Substitutes all the labels for relative jumps, since labels are
+         * an assembly abstraction. At this point, instructions are basically
+         * the bytecode we want, it just needs to be converted into numbers
+         */
+        private static void SubstituteLabelsForJumps(List<string> instructions, Dictionary<string, int> addressesOfLabels) {
+
             List<string> labelIsThirdOperand = ["beq", "bne", "blt", "bge", "bltu", "bgeu"];
             List<string> labelIsSecondOperand = ["jal"] ;
+
             // DOES NOT handle %label_hi and %label_lo
             for (int i = 0; i < instructions.Count; i++) {
                 string[] tokens = instructions[i].Split([' ', '\t', ','], StringSplitOptions.RemoveEmptyEntries);
@@ -426,6 +439,7 @@ namespace Riscv32Sim {
                     int relativeJump = labelAddress - instructionAddress;
                     instructions[i] = $"\t{operation}\t{operands[0]},{operands[1]},{relativeJump}";
                 }
+
                 if (labelIsSecondOperand.Contains(operation)) {
                     int instructionAddress = i*4;
                     string label = operands[1];
@@ -435,7 +449,12 @@ namespace Riscv32Sim {
                 }
             }
 
-            File.WriteAllLines(_labelsHandled, instructions);
+        }
+        
+        /* Converts instructions from List<string> instructions into numbers,
+         * computers can handle them more efficiently after all
+         */
+        public void ConvertStringInstructionsToIntegers(List<string> instructions) {
 
             for (int i = 0; i < instructions.Count; i++) {
                 string instructionStr = instructions[i];
@@ -457,6 +476,36 @@ namespace Riscv32Sim {
                 instructions[i] = instruction.ToString();
             }
 
+        }
+        
+        /* A wrapper, that orchestrates transformation from gcc-generated assembly
+         * to the bytecode a VM can use via the following pipeline:
+         * Expand pseudo-instructions -> firure out what addresses labels point to ->
+         * -> substitute labels for relative jumps -> convert it all to integers 
+         */
+        public void Assemble() {
+
+            string[] instructionsFile = File.ReadAllLines(_inFile);
+            List<string> instructions = new List<string>(instructionsFile);
+        
+            ExpandPseudoInstructions(instructions);
+
+            instructions = instructions.SelectMany(line => line.Split('\n')).ToList();
+            File.WriteAllLines(_pseudoHandled, instructions);
+
+            Dictionary<string, int> addressesOfLabels = new();
+            GetAddressesOfLabels(instructions, addressesOfLabels);
+
+            instructions.RemoveAll(line => line.Trim().StartsWith('.') || 
+                                   line.Trim().EndsWith(':') || 
+                                   string.IsNullOrWhiteSpace(line));
+
+            SubstituteLabelsForJumps(instructions, addressesOfLabels);
+
+            File.WriteAllLines(_labelsHandled, instructions);
+
+            ConvertStringInstructionsToIntegers(instructions);
+
             File.WriteAllLines(_outFile, instructions);
 
         }
@@ -473,7 +522,7 @@ namespace Riscv32Sim {
 
         public static void Main(string[] args) {
             
-            PseudoAssembler assembler = new("in.s", "interm.p.s", "interm.l.s", "prog.rvm");
+            PseudoAssembler assembler = new("in.s", "interm.pi.s", "interm.lbl.s", "prog.rv32bc");
             assembler.Assemble();
 
         }
