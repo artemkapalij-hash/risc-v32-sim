@@ -2,6 +2,7 @@
 using System.IO;
 using System.Collections.Generic;
 using System.Collections.Frozen;
+using System.Buffers.Binary;
 
 namespace Riscv32Sim {
     
@@ -13,11 +14,11 @@ namespace Riscv32Sim {
      */
     readonly record struct Instruction {
 
-        readonly int opcode;
-        readonly int rd;
-        readonly int rs1;
-        readonly int rs2;
-        readonly int imm;
+        public readonly int opcode;
+        public readonly int rd;
+        public readonly int rs1;
+        public readonly int rs2;
+        public readonly int imm;
 
         public Instruction(int opcode, int rd=0, int rs1=0, int rs2=0, int imm=0) {
             this.opcode = opcode;
@@ -487,6 +488,11 @@ namespace Riscv32Sim {
 
             string[] instructionsFile = File.ReadAllLines(_inFile);
             List<string> instructions = new List<string>(instructionsFile);
+            // https://jborza.com/post/2021-05-11-riscv-linux-syscalls/
+            // 93 is the syscall for exit, stored into a7 register
+            instructions.Insert(0, "\tecall");
+            instructions.Insert(0, "\tli\ta7,93");
+            instructions.Insert(0, "\tcall\tmain");
         
             ExpandPseudoInstructions(instructions);
 
@@ -512,19 +518,241 @@ namespace Riscv32Sim {
 
     }
 
-    /*/
-    static class VM {
+    sealed class RV32VM {
+
+        public enum Opcode
+
+        {
+
+            INVALID = 0,
+
+            // R
+            ADD  = 1,
+            SUB  = 2,
+            SLL  = 3,
+            SLT  = 4,
+            SLTU = 5,
+            XOR  = 6,
+            SRL  = 7,
+            SRA  = 8,
+            OR   = 9,
+            AND  = 10,
+
+            // IA
+            ADDI  = 11,
+            SLTI  = 12,
+            SLTIU = 13,
+            XORI  = 14,
+            ORI   = 15,
+            ANDI  = 16,
+            SLLI  = 17,
+            SRLI  = 18,
+            SRAI  = 19,
+
+            // IL
+            LB   = 20,
+            LH   = 21,
+            LW   = 22,
+            LBU  = 23,
+            LHU  = 24,
+            JALR = 25,
+
+            // IN
+            ECALL  = 26,
+            EBREAK = 27,
+
+            // S
+            SB = 28,
+            SH = 29,
+            SW = 30,
+
+            // B
+            BEQ  = 31,
+            BNE  = 32,
+            BLT  = 33,
+            BGE  = 34,
+            BLTU = 35,
+            BGEU = 36,
+
+            // U
+            LUI   = 37, 
+            AUIPC = 38,
+
+            // J
+            JAL = 39,
+
+        }
+
+        private byte[] _RAM;
+        private int[] _registers;
+        private readonly int _registersCount;
+        private readonly int _stackPointerRegister;
+        private int _pc;
+        private readonly int _RAMSize;
+        private readonly string _inFile;
+
+        public RV32VM(int RAMSize, string inFile) {
+            _registersCount = 32;
+            _stackPointerRegister = 2;
+            _RAMSize = RAMSize;
+            _registers = new int[_registersCount];
+            _RAM = new byte[_RAMSize];
+            _inFile = inFile;
+        }
+
+        private List<Instruction> GetAllInstructions() {
+            List<string> instructionsStr = File.ReadAllLines(_inFile).ToList();
+            List<Instruction> instructionsActual = new();
+            foreach (string instruction in instructionsStr) {
+                int[] fields = Array.ConvertAll(
+                    instruction.Split(' ', StringSplitOptions.RemoveEmptyEntries),
+                    int.Parse);
+                Instruction newInstruction = new(fields[0], fields[1], fields[2], fields[3], fields[4]);
+                instructionsActual.Add(newInstruction);
+            }
+            return instructionsActual;
+        }
+
+        private bool AccessValid(int address, int offset) {
+            return address + offset <= _RAMSize && address >= 0;
+        }
+
+        private int ReadByte(int address, bool isSigned) {
+            if (!AccessValid(address, 1)) {
+                throw new ArgumentOutOfRangeException(nameof(address), $"Access of 1 byte on address {address} at pc {_pc}");
+            }
+            return isSigned ? (sbyte)_RAM[address] : _RAM[address];
+        }
+
+        private int ReadHalf(int address, bool isSigned) {
+            if (!AccessValid(address, 2)) {
+                throw new ArgumentOutOfRangeException(nameof(address), $"Access of 2 bytes on address {address} at pc {_pc}");
+            }
+            ReadOnlySpan<byte> half = _RAM.AsSpan(address, 2);
+            return isSigned ? BinaryPrimitives.ReadInt16LittleEndian(half) : BinaryPrimitives.ReadUInt16LittleEndian(half);
+        }
+
+        private int ReadWord(int address) {
+            if (!AccessValid(address, 4)) {
+                throw new ArgumentOutOfRangeException(nameof(address), $"Access of 4 bytes on address {address} at pc {_pc}");
+            }
+            ReadOnlySpan<byte> word = _RAM.AsSpan(address, 4);
+            return BinaryPrimitives.ReadInt32LittleEndian(word);
+        }
+
+        private void WriteByte(int address, byte write) {
+            if (!AccessValid(address, 1)) {
+                throw new ArgumentOutOfRangeException(nameof(address), $"Access of 1 byte on address {address} at pc {_pc}");
+            }
+            _RAM[address] = write;
+        }
+
+        private void WriteHalf(int address, short write) {
+            if (!AccessValid(address, 2)) {
+                throw new ArgumentOutOfRangeException(nameof(address), $"Access of 2 bytes on address {address} at pc {_pc}");
+            }
+            BinaryPrimitives.WriteInt16LittleEndian(_RAM.AsSpan(address, 2), (short)write);
+        }
+
+        private void WriteWord(int address, int write) {
+            if (!AccessValid(address, 4)) {
+                throw new ArgumentOutOfRangeException(nameof(address), $"Access of 4 bytes on address {address} at pc {_pc}");
+            }
+            BinaryPrimitives.WriteInt32LittleEndian(_RAM.AsSpan(address, 4), write);
+        }
+
+        public void Execute() {
+
+            List<Instruction> instructions = GetAllInstructions();
+            _registers[_stackPointerRegister] = (_RAMSize - (_RAMSize % 8)) - 32; // Good enough for now
+            _pc = 0;
+            
+            while (true) {
+                
+                Instruction instruction = instructions[_pc / 4];
+
+                _registers[0] = 0;
+                int rs1 = _registers[instruction.rs1];
+                int rs2 = _registers[instruction.rs2];
+                int imm = instruction.imm;
+                ref int rd = ref _registers[instruction.rd];
+
+                switch ((Opcode)instruction.opcode) {
+                    
+                    // R
+                    case Opcode.ADD:  rd = rs1 + rs2; _pc += 4; break;
+                    case Opcode.SUB:  rd = rs1 - rs2; _pc += 4; break;
+                    case Opcode.SLL:  rd = (int)((uint)rs1 << (rs2 & 0b11111)); _pc += 4; break;
+                    case Opcode.SLT:  rd = rs1 < rs2 ? 1 : 0; _pc += 4; break;
+                    case Opcode.SLTU: rd = (uint)rs1 < (uint)rs2 ? 1 : 0; _pc += 4; break;
+                    case Opcode.XOR:  rd = rs1 ^ rs2; _pc += 4; break;
+                    case Opcode.SRL:  rd = (int)((uint)rs1 >> (rs2 & 0b11111)); _pc += 4; break;
+                    case Opcode.SRA:  rd = rs1 >> (rs2 & 0b11111); _pc += 4; break;
+                    case Opcode.OR:   rd = rs1 | rs2; _pc += 4; break;
+                    case Opcode.AND:  rd = rs1 & rs2; _pc += 4; break;
+
+                    // IA
+                    case Opcode.ADDI:  rd = rs1 + imm; _pc += 4; break;
+                    case Opcode.SLTI:  rd = rs1 < imm ? 1 : 0; _pc += 4; break;
+                    case Opcode.SLTIU: rd = (uint)rs1 < (uint)imm ? 1 : 0; _pc += 4; break;
+                    case Opcode.XORI:  rd = rs1 ^ imm; _pc += 4; break;
+                    case Opcode.ORI:   rd = rs1 | imm; _pc += 4; break;
+                    case Opcode.ANDI:  rd = rs1 & imm; _pc += 4; break;
+                    case Opcode.SLLI:  rd = (int)((uint)rs1 << (imm & 0b11111)); _pc += 4; break;
+                    case Opcode.SRLI:  rd = (int)((uint)rs1 >> (imm & 0b11111)); _pc += 4; break;
+                    case Opcode.SRAI:  rd = rs1 >> (imm & 0b11111); _pc += 4; break;
+
+                    // IL
+                    case Opcode.LB:   rd = ReadByte(rs1+imm, isSigned: true);  _pc += 4; break;
+                    case Opcode.LH:   rd = ReadHalf(rs1+imm, isSigned: true);  _pc += 4; break;
+                    case Opcode.LW:   rd = ReadWord(rs1+imm);                  _pc += 4; break;
+                    case Opcode.LBU:  rd = ReadByte(rs1+imm, isSigned: false); _pc += 4; break;
+                    case Opcode.LHU:  rd = ReadHalf(rs1+imm, isSigned: false); _pc += 4; break;
+                    case Opcode.JALR: rd = _pc + 4; _pc = (rs1 + imm) & ~1;              break;
+                    
+                    // TODO: Make proper ecall and ebreak
+                    // IN
+                    case Opcode.ECALL:  Console.WriteLine($"The program {_inFile} returned with exit code {_registers[10]}"); return;
+                    case Opcode.EBREAK: Console.WriteLine($"Breakpoint at {_pc}"); return;
+
+                    // S
+                    case Opcode.SB: WriteByte(rs1 + imm, (byte)rs2);  _pc += 4; break;
+                    case Opcode.SH: WriteHalf(rs1 + imm, (short)rs2); _pc += 4; break;
+                    case Opcode.SW: WriteWord(rs1 + imm, rs2);        _pc += 4; break;
+
+                    // B
+                    case Opcode.BEQ:  _pc += (rs1 == rs2) ? imm : 4; break;
+                    case Opcode.BNE:  _pc += (rs1 != rs2) ? imm : 4; break;
+                    case Opcode.BLT:  _pc += (rs1 <  rs2) ? imm : 4; break;
+                    case Opcode.BGE:  _pc += (rs1 >= rs2) ? imm : 4; break;
+                    case Opcode.BLTU: _pc += ((uint)rs1 <  (uint)rs2) ? imm : 4; break;
+                    case Opcode.BGEU: _pc += ((uint)rs1 >= (uint)rs2) ? imm : 4; break;
+
+                    // U
+                    case Opcode.LUI:   rd = (imm << 12);       _pc += 4; break;
+                    case Opcode.AUIPC: rd = _pc + (imm << 12); _pc += 4; break;
+
+                    // J
+                    case Opcode.JAL: rd = _pc + 4; _pc += imm; break;
+                    
+                    default: throw new InvalidOperationException($"Unrecognized opcode {instruction.opcode}");
+
+                }
+
+            }
+            
+        }
 
     }
-    /*/
 
     public class Top {
 
         public static void Main(string[] args) {
             
-            PseudoAssembler assembler = new("in.s", "interm.pi.s", "interm.lbl.s", "prog.rv32bc");
+            PseudoAssembler assembler = new("test-cases/gcd/prog.s", "out/interm.pi.s", "out/interm.lbl.s", "out/prog.rv32bc");
             assembler.Assemble();
-
+            RV32VM VM = new(16*1024*1024, "out/prog.rv32bc");
+            VM.Execute();
         }
 
     }

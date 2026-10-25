@@ -1,8 +1,5 @@
 *.swp
 obj/
 bin/
+out/
 a.out
-*.p.s
-*.l.s
-*.s
-*.rv32bc
