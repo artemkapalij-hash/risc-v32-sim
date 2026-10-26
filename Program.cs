@@ -599,7 +599,8 @@ namespace Riscv32Sim {
             _RAM = new byte[_RAMSize];
             _inFile = inFile;
         }
-
+        
+        // Turns a file with .rv32bc extention (in a correct format) into List<Instruction>
         private List<Instruction> GetAllInstructions() {
             List<string> instructionsStr = File.ReadAllLines(_inFile).ToList();
             List<Instruction> instructionsActual = new();
@@ -612,11 +613,14 @@ namespace Riscv32Sim {
             }
             return instructionsActual;
         }
-
+        
+        // Helper method for reading and writing method group, verifies that the
+        // address read/write is done onto is indeed in RAM 
         private bool AccessValid(int address, int offset) {
             return address + offset <= _RAMSize && address >= 0;
         }
-
+        
+        // A group of methods for reading and writing into byte[] _RAM
         private int ReadByte(int address, bool isSigned) {
             if (!AccessValid(address, 1)) {
                 throw new ArgumentOutOfRangeException(nameof(address), $"Access of 1 byte on address {address} at pc {_pc}");
@@ -661,14 +665,18 @@ namespace Riscv32Sim {
             BinaryPrimitives.WriteInt32LittleEndian(_RAM.AsSpan(address, 4), write);
         }
 
+        /* Essentially a big switch statement, that terminates upon an ecall to exit()
+         * (just any ecall for now, since host functions are not implemented)
+         * Prints exit code of the program upon termination
+         */
         public void Execute() {
 
             List<Instruction> instructions = GetAllInstructions();
             _registers[_stackPointerRegister] = (_RAMSize - (_RAMSize % 8)) - 32; // Good enough for now
             _pc = 0;
-            
+
             while (true) {
-                
+
                 Instruction instruction = instructions[_pc / 4];
 
                 _registers[0] = 0;
@@ -680,27 +688,27 @@ namespace Riscv32Sim {
                 switch ((Opcode)instruction.opcode) {
                     
                     // R
-                    case Opcode.ADD:  rd = rs1 + rs2; _pc += 4; break;
-                    case Opcode.SUB:  rd = rs1 - rs2; _pc += 4; break;
+                    case Opcode.ADD:  rd = rs1 + rs2;                           _pc += 4; break;
+                    case Opcode.SUB:  rd = rs1 - rs2;                           _pc += 4; break;
                     case Opcode.SLL:  rd = (int)((uint)rs1 << (rs2 & 0b11111)); _pc += 4; break;
-                    case Opcode.SLT:  rd = rs1 < rs2 ? 1 : 0; _pc += 4; break;
-                    case Opcode.SLTU: rd = (uint)rs1 < (uint)rs2 ? 1 : 0; _pc += 4; break;
-                    case Opcode.XOR:  rd = rs1 ^ rs2; _pc += 4; break;
+                    case Opcode.SLT:  rd = rs1 < rs2 ? 1 : 0;                   _pc += 4; break;
+                    case Opcode.SLTU: rd = (uint)rs1 < (uint)rs2 ? 1 : 0;       _pc += 4; break;
+                    case Opcode.XOR:  rd = rs1 ^ rs2;                           _pc += 4; break;
                     case Opcode.SRL:  rd = (int)((uint)rs1 >> (rs2 & 0b11111)); _pc += 4; break;
-                    case Opcode.SRA:  rd = rs1 >> (rs2 & 0b11111); _pc += 4; break;
-                    case Opcode.OR:   rd = rs1 | rs2; _pc += 4; break;
-                    case Opcode.AND:  rd = rs1 & rs2; _pc += 4; break;
+                    case Opcode.SRA:  rd = rs1 >> (rs2 & 0b11111);              _pc += 4; break;
+                    case Opcode.OR:   rd = rs1 | rs2;                           _pc += 4; break;
+                    case Opcode.AND:  rd = rs1 & rs2;                           _pc += 4; break;
 
                     // IA
-                    case Opcode.ADDI:  rd = rs1 + imm; _pc += 4; break;
-                    case Opcode.SLTI:  rd = rs1 < imm ? 1 : 0; _pc += 4; break;
-                    case Opcode.SLTIU: rd = (uint)rs1 < (uint)imm ? 1 : 0; _pc += 4; break;
-                    case Opcode.XORI:  rd = rs1 ^ imm; _pc += 4; break;
-                    case Opcode.ORI:   rd = rs1 | imm; _pc += 4; break;
-                    case Opcode.ANDI:  rd = rs1 & imm; _pc += 4; break;
+                    case Opcode.ADDI:  rd = rs1 + imm;                           _pc += 4; break;
+                    case Opcode.SLTI:  rd = rs1 < imm ? 1 : 0;                   _pc += 4; break;
+                    case Opcode.SLTIU: rd = (uint)rs1 < (uint)imm ? 1 : 0;       _pc += 4; break;
+                    case Opcode.XORI:  rd = rs1 ^ imm;                           _pc += 4; break;
+                    case Opcode.ORI:   rd = rs1 | imm;                           _pc += 4; break;
+                    case Opcode.ANDI:  rd = rs1 & imm;                           _pc += 4; break;
                     case Opcode.SLLI:  rd = (int)((uint)rs1 << (imm & 0b11111)); _pc += 4; break;
                     case Opcode.SRLI:  rd = (int)((uint)rs1 >> (imm & 0b11111)); _pc += 4; break;
-                    case Opcode.SRAI:  rd = rs1 >> (imm & 0b11111); _pc += 4; break;
+                    case Opcode.SRAI:  rd = rs1 >> (imm & 0b11111);              _pc += 4; break;
 
                     // IL
                     case Opcode.LB:   rd = ReadByte(rs1+imm, isSigned: true);  _pc += 4; break;
@@ -721,10 +729,10 @@ namespace Riscv32Sim {
                     case Opcode.SW: WriteWord(rs1 + imm, rs2);        _pc += 4; break;
 
                     // B
-                    case Opcode.BEQ:  _pc += (rs1 == rs2) ? imm : 4; break;
-                    case Opcode.BNE:  _pc += (rs1 != rs2) ? imm : 4; break;
-                    case Opcode.BLT:  _pc += (rs1 <  rs2) ? imm : 4; break;
-                    case Opcode.BGE:  _pc += (rs1 >= rs2) ? imm : 4; break;
+                    case Opcode.BEQ:  _pc += (rs1 == rs2) ? imm : 4;             break;
+                    case Opcode.BNE:  _pc += (rs1 != rs2) ? imm : 4;             break;
+                    case Opcode.BLT:  _pc += (rs1 <  rs2) ? imm : 4;             break;
+                    case Opcode.BGE:  _pc += (rs1 >= rs2) ? imm : 4;             break;
                     case Opcode.BLTU: _pc += ((uint)rs1 <  (uint)rs2) ? imm : 4; break;
                     case Opcode.BGEU: _pc += ((uint)rs1 >= (uint)rs2) ? imm : 4; break;
 
@@ -748,11 +756,12 @@ namespace Riscv32Sim {
     public class Top {
 
         public static void Main(string[] args) {
-            
+
             PseudoAssembler assembler = new("test-cases/gcd/prog.s", "out/interm.pi.s", "out/interm.lbl.s", "out/prog.rv32bc");
             assembler.Assemble();
             RV32VM VM = new(16*1024*1024, "out/prog.rv32bc");
             VM.Execute();
+
         }
 
     }
